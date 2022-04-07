@@ -1,0 +1,825 @@
+;
+;
+;******************************************************************************
+;
+;	Arquivo de Referência para o desenvolvimento do kernel.
+;
+;	Versão: 2021.1
+;
+;	Áreas de memória
+;
+;	0000 - 7FFF		_KERNEL
+;					Área de Kernel para implementação dos alunos
+;
+;	0100 - 01FF		_VETTAB
+;					Tabela com os vetores das funções do kernel
+;					*** CUIDADO! Esse vetor está no meio da área de código ***
+;
+;	8000 - FF7F		_APP
+;					Área onde será colocado o programa de aplicação.
+;					Esse programa vai fazer o acesso aos periféricos e interrupções, através das funções do Kernel.
+;
+;	FF80 - FFBF 	_IOAREA16
+;					Area de perifericos, acessada na base 16 bits
+;
+;	FFC0 - FFFF		_IOAREA08
+;					Area de perifericos, acessada na base 8 bits
+;					
+;******************************************************************************
+
+
+_KERNEL:	equ	h0000
+_VETTAB:	equ	h0100
+_APP:		equ	h8000
+_IOAREA16:	equ	hFF80
+_IOAREA08:	equ	hFFC0
+
+
+;
+;------------------------------------------------------------------------------
+;	Área reservada para os periféricos
+;------------------------------------------------------------------------------
+
+; Acesso em 16 bits
+		org		_IOAREA16
+		daw		[31]
+IVET:	dw		0			; Vetor de interrupção
+
+; Acesso em 8 bits
+		org		_IOAREA08
+		dab		[23]
+TIMDT:	db		0			; Registro de programação do timer
+INTS:	db		0			; INTERRUPT STATUS: IP x x x . x x IPStec IPStim
+INTE:	db		0			; INTERRUPT ENABLE: IE x x x . x x IEStec IEStim
+TECST:	db		0			; Status do teclado
+TECDT:	db		0			; Dado do teclado
+VISOR:	dab		[36]		; Portas de acesso ao visor
+
+;	
+;------------------------------------------------------------------------------
+;	Ponto de entrada do RESET do processador
+;------------------------------------------------------------------------------
+		org		_KERNEL
+		jmp		_RESET
+
+;
+;------------------------------------------------------------------------------
+;	Area do kernel com os vetores das funções do kernel
+;------------------------------------------------------------------------------
+		org		_VETTAB
+		dw		_kbhit
+		dw		_getchar
+		dw		_putchar
+		dw		_get_clock_status
+		dw		_get_clock_time
+		dw		_turnon_clock
+		dw		_clr_clock
+		
+;	
+;------------------------------------------------------------------------------
+;	Código de RESET (BOOT) do processador/interrupção
+;------------------------------------------------------------------------------
+		org		_VETTAB+h0100
+_RESET:		
+; 1) Desabilitar o sistema de interrupções
+		clr INTE
+; 2) Inicializar o stack pointer (SP = R6)
+		mov #h7FFF r6
+; 3) Inicializar as variáveis internas usadas pelo sistema de interrupções e periféricos (IVET, INTE, etc.)
+		mov #ISR, IVET
+		clr INTS
+; 4) Inicializar as variáveis internas do kernel
+		clr TECLA
+		mov #-1 TECLA
+		clr CURSOR
+		clr CURSOR_tick
+		clr CARACTERE_CURS
+		clr STATUS_rel0
+		clr INV_rel0
+		clr SEG_uni_rel0
+		clr MIN_uni_rel0
+		clr SEG_dec_rel0
+		clr MIN_dec_rel0
+		clr STATUS_rel1
+		clr INV_rel1
+		clr SEG_uni_rel1
+		clr MIN_uni_rel1
+		clr SEG_dec_rel1
+		clr MIN_dec_rel1
+		
+; 5) Inicializar o teclado zerando o byte de estado (TECST, endereço 65498)
+		clr TECST
+; 6) Inicializar o timer
+		mov #250, TIMDT
+; 7) Limpar o visor
+		jsr R7, ClearDisplay
+; 8) Habilitar interrupções
+		mov #131, INTE
+; 9) Retornar para o programa de aplicação com um desvio para o endereço _APP da memória
+		jmp		_APP
+	
+;------------------------------------------------------------------------------
+;	Variáveis
+;------------------------------------------------------------------------------
+
+TECLA: 		dw 	0; buffer de teclado
+CURSOR: 	dw 	; cursor
+
+CURSOR_tick:	dw	0
+CARACTERE_CURS:	dw	0
+
+STATUS_rel0:	dw	0; status do relógio 0 (0 - se parado, 1 se andando)
+INV_rel0:	dw	0; visibilidade do relógio 0 (0 - se invisível, 1 se visível)
+TICK_rel0: 	dw	0
+SEG_uni_rel0: 	dw	0
+MIN_uni_rel0: 	dw	0
+SEG_dec_rel0: 	dw	0
+MIN_dec_rel0: 	dw	0
+
+
+STATUS_rel1:	dw	0; status do relógio 1 (0 - se parado, 1 se andando)
+INV_rel1:	dw	0; visibilidade do relógio 1 (0 - se invisível, 1 se visível)
+TICK_rel1: 	dw	0
+SEG_uni_rel1: 	dw	0
+MIN_uni_rel1: 	dw	0
+SEG_dec_rel1: 	dw	0
+MIN_dec_rel1: 	dw	0
+
+;------------------------------------------------------------------------------
+;	Funções
+;------------------------------------------------------------------------------
+; Limpa o visor
+ClearDisplay:
+		mov		#VISOR,r0
+CD_Loop:
+		mov		#' ',(r0)
+		inc		r0
+		bne		CD_Loop
+		rts		r7
+
+;------------------------------------------------------------------------------
+;	Tratador de Interrupções
+;------------------------------------------------------------------------------
+
+; Rotina de INTERRUPÇÃO
+isr:		
+		and		#h7F INTE	; Desliga interrupções
+		mov		r0,-(r6)	; Salva registradores
+		mov		r1,-(r6)
+		mov		r2,-(r6)
+		mov		r3,-(r6)
+		mov		r4,-(r6)
+		mov		r5,-(r6)
+
+		mov 		INTS,r0		; Verifica se é INT do TECLADO
+		and		#2,r0
+		beq		ISR2
+		jsr		r7,ISRtec	; Tratamento da INT do TECLADO
+
+ISR2:
+		mov		INTS,r0		; Verifica se é INT do TIMER
+		and		#1,r0
+		beq		ISR3
+		jsr 		r7,ISRtim	; Tratamento da INT do TIMER
+		and 		#HFFFE INTS
+
+ISR3:
+		mov		(r6)+,r5	; Retorna os registradores da pilha
+		mov		(r6)+,r4
+		mov		(r6)+,r3
+		mov		(r6)+,r2
+		mov		(r6)+,r1
+		mov		(r6)+,r0
+
+		rti					; Return From Interrupt
+
+; =================================================
+
+ISRtec:
+		tst TECST				; Testar se alguma tecla foi digitada
+		beq fim_tec
+		jmp testes_teclas_especiais
+
+
+fim_tec:
+		clr TECST
+		and #HFFFD INTS
+		rts r7
+
+testes_teclas_especiais:
+		mov TECDT r1			; verifica se é vírgula, ponto, < ou >
+		cmp r1 #44
+		beq tratamento_rel0
+		cmp r1 #60
+		beq tratamento_rel0
+		cmp r1 #46
+		beq tratamento_rel1_ponte
+		cmp r1 #62
+		beq tratamento_rel1
+		jmp captura_tecla
+
+tratamento_rel0:	
+		mov INV_rel0 r1
+		tst r1
+		beq zero_rel0
+		mov #0 INV_rel0
+		mov #24 r1
+		mov #5 r2
+
+loop_zerar_rel0:
+		mov #' ' hFFDC(r1)
+		inc r1
+		dec r2
+		beq fim_tec
+		jmp loop_zerar_rel0
+
+fim_tec_1:
+		jmp fim_tec
+
+tratamento_rel1_ponte:
+		jmp tratamento_rel1
+
+zero_rel0:	
+		mov #1 INV_rel0
+		mov #24 r1
+		mov MIN_dec_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov MIN_uni_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov #58 hFFDC(r1)
+		inc r1
+		mov SEG_dec_rel0 r2
+		add #48 r2 
+		mov r2 hFFDC(r1)
+		inc r1
+		mov SEG_uni_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		jmp fim_tec
+
+tratamento_rel1:	
+		mov INV_rel1 r1
+		tst r1
+		beq zero_rel1
+		mov #0 INV_rel1
+		mov #31 r1
+		mov #5 r2
+
+loop_zerar_rel1:
+		mov #' ' hFFDC(r1)
+		inc r1
+		dec r2
+		beq fim_tec_1
+		jmp loop_zerar_rel1
+
+zero_rel1:	
+		mov #1 INV_rel1
+		mov #31 r1
+		mov MIN_dec_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov MIN_uni_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov #58 hFFDC(r1)
+		inc r1
+		mov SEG_dec_rel1 r2
+		add #48 r2 
+		mov r2 hFFDC(r1)
+		inc r1
+		mov SEG_uni_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		jmp fim_tec
+
+
+captura_tecla:	
+		mov TECDT TECLA		; se não for uma tecla de controle, a tecla é salva na variável 'TECLA'
+		jmp fim_tec_1
+
+; =================================================
+		
+ISRtim:	
+		jsr r7,cursor_piscante
+		tst STATUS_rel0		; testa se o relogio zero precisa andar, se sim, pula para rotina de acréscimo de relogio
+		beq ISR_rel1
+		jsr r7,INCtick_rel0
+
+ISR_rel1:
+		tst STATUS_rel1		; testa se o relogio um precisa andar, se sim, pula para rotina de acréscimo de relogio
+		beq fim_tim_ponte
+		jsr r7,INCtick_rel1
+		rts r7
+
+cursor_piscante:
+		inc CURSOR_tick
+		cmp CURSOR_tick #2
+		beq cursor_piscante_2
+		jmp fim_tim_ponte
+
+cursor_piscante_2:
+		clr CURSOR_tick
+		mov CURSOR r0
+		cmp hFFDC(r0) #95
+		beq cursor_piscante_3
+		mov hFFDC(r0) CARACTERE_CURS
+		mov #95 hFFDC(r0) 
+		jmp fim_tim_ponte
+
+cursor_piscante_3:
+		mov CARACTERE_CURS hFFDC(r0)
+		jmp fim_tim_ponte
+		
+INCtick_rel0:
+		inc TICK_rel0
+		cmp TICK_rel0 #4	; 4 ticks = 1 segundo
+		beq INCseg_uni_rel0
+		rts r7
+
+INCseg_uni_rel0:
+		clr TICK_rel0
+		inc SEG_uni_rel0
+		cmp SEG_uni_rel0 #10
+		beq INCseg_dec_rel0
+		jmp rel0_visor_at
+
+INCseg_dec_rel0:
+		clr SEG_uni_rel0
+		inc SEG_dec_rel0
+		cmp SEG_dec_rel0 #6
+		beq INCmin_uni_rel0
+		jmp rel0_visor_at
+
+fim_tim_ponte:
+		jmp fim_tim
+
+
+INCmin_uni_rel0: 
+		clr SEG_dec_rel0
+		inc MIN_uni_rel0
+		cmp MIN_uni_rel0 #10
+		beq INCmin_dec_rel0
+		jmp rel0_visor_at
+
+INCmin_dec_rel0:
+		clr MIN_uni_rel0
+		inc MIN_dec_rel0 
+		cmp MIN_dec_rel0 #6
+		bne rel0_visor_at
+		clr MIN_dec_rel0
+		jmp fim_tim
+
+rel0_visor_at:
+		tst INV_rel0
+		beq fim_tim
+		mov #24 r1
+		mov MIN_dec_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov MIN_uni_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov #58 hFFDC(r1)
+		inc r1
+		mov SEG_dec_rel0 r2
+		add #48 r2 
+		mov r2 hFFDC(r1)
+		inc r1
+		mov SEG_uni_rel0 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		jmp fim_tim
+		
+
+; ===============================================
+fim_tim:	
+		rts r7
+	
+INCtick_rel1:
+		inc TICK_rel1
+		cmp TICK_rel1 #4	; 4 ticks = 1 segundo
+		beq INCseg_uni_rel1
+		rts r7
+
+INCseg_uni_rel1:
+		clr TICK_rel1
+		inc SEG_uni_rel1
+		cmp SEG_uni_rel1 #10
+		beq INCseg_dec_rel1
+		jmp rel1_visor_at
+
+INCseg_dec_rel1:
+		clr SEG_uni_rel1
+		inc SEG_dec_rel1
+		cmp SEG_dec_rel1 #6
+		beq INCmin_uni_rel1
+		jmp rel1_visor_at
+		
+
+INCmin_uni_rel1: 
+		clr SEG_dec_rel1
+		inc MIN_uni_rel1
+		cmp MIN_uni_rel1 #10
+		beq INCmin_dec_rel1
+		jmp rel1_visor_at
+
+INCmin_dec_rel1:
+		clr MIN_uni_rel1
+		inc MIN_dec_rel1 
+		cmp MIN_dec_rel1 #6
+		bne rel1_visor_at
+		clr MIN_dec_rel1
+		jmp fim_tim
+		
+rel1_visor_at:
+		tst INV_rel1
+		beq fim_tim
+		mov #31 r1
+		mov MIN_dec_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov MIN_uni_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		inc r1
+		mov #58 hFFDC(r1)
+		inc r1
+		mov SEG_dec_rel1 r2
+		add #48 r2 
+		mov r2 hFFDC(r1)
+		inc r1
+		mov SEG_uni_rel1 r2
+		add #48 r2
+		mov r2 hFFDC(r1)
+		jmp fim_tim
+;		
+;------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel a informação sobre a existência de tecla digitada.
+; A função deve retornar com a informação da existência de tecla, sem aguardar pela digitação de qualquer tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a informação da existência de tecla. 
+; A função retorna no registrador R0 a informação se existe tecla ou não. 
+; - Se há tecla, o valor em R0 será zero; 
+; - Se não há tecla, o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_kbhit:	
+		cmp TECLA #-1		
+		bne existe_tecla		; se existir tecla, redirecionamento para a função existe_tecla
+		mov #1 r0			; se não, mover o valor 1 para o registrador 0 e finalizar
+		rts r7
+
+existe_tecla:
+		mov #0 r0			; mover o valor 0 para o registrador 0 e finalizar
+		rts r7
+		
+;		
+;------------------------------------------------------------------------------
+; Função através da qual pode-se solicitar ao kernel que aguarde pela digitação de uma tecla.
+; A função deve retornar o código ASCII da tecla digitada.
+; Portanto, a função deve aguardar pela digitação de uma tecla. 
+; - Parâmetros de entrada: nenhum. 
+; - Parâmetro de saída: registrador R0, com a tecla digitada. 
+; A função só retorna (só termina) quando o usuário digitar alguma tecla.
+; O código ASCII da tecla digitada deve ser retornado no registrador R0. 
+; Sempre que a função “_getchar” for chamada e estiver bloqueada aguardando por uma tecla,
+;     a posição do cursor deve ser apresentado no visor através do símbolo “_” (underscore).
+; Esse símbolo deve ser alternado com o caractere que estiver sendo apresentado nessa posição.
+; Essa alternância deve ter uma periodicidade tal que cada símbolo permaneça no visor por 500ms. 
+;------------------------------------------------------------------------------
+_getchar:	
+		cmp  TECLA #128
+		bge _getchar
+
+		cmp TECLA #0
+		blt _getchar
+
+		mov TECLA r0
+		mov #-1 TECLA
+		rts		r7
+		
+;		
+;------------------------------------------------------------------------------
+; Envia um caractere ASCII para o visor.
+; Esse caractere pode ser um caractere visível ou um caractere de controle. 
+; - Parâmetros de entrada: registrador R5, com o caractere a ser colocado no visor. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; O código no registrador R5 pode representar caracteres visíveis ou caracteres de controle. 
+; Na inicialização do kernel, o visor deve ser limpo (apagado) e o cursor deve ser posicionado no início do visor. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada, o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_putchar:
+		mov CURSOR r0
+		cmp r5 #h20
+		blt var_controle 
+		cmp r5 #128
+		bpl erro_putchar
+		cmp CURSOR #22
+		beq fim_putchar
+		mov r5 hFFDC(r0)
+		inc CURSOR
+		rts		r7
+
+var_controle:
+		cmp r5 #h0d
+		beq carriage_return
+		cmp r5 #h08
+		beq back_space
+		jmp erro_putchar
+
+carriage_return:
+		clr CURSOR
+		jmp fim_putchar
+
+back_space:
+		tst CURSOR
+		beq fim_putchar
+		dec CURSOR
+		jmp fim_putchar
+
+fim_putchar:
+		clr r0
+		rts r7
+
+erro_putchar:
+		mov #1 r0
+		rts r7
+
+
+		
+		
+;		
+;------------------------------------------------------------------------------
+; Essa função fornece as informações relativas à situação atual de cada relógio, 
+; no que diz respeito à sua visibilidade e se está andando. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). 
+; Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com a indicação do estado do relógio (visibilidade e se está parado). 
+; No retorno da função, o registrador R0 conterá as informações do estado do relógio em seus bits 0 e bit 1. 
+; O bit 0, quando ligado (valor “1”), indica que o relógio está visível;
+; O bit 1, quando ligado (valor “1”), indica que o relógio está andando. 
+;------------------------------------------------------------------------------
+_get_clock_status:
+		clr r0
+		cmp r5 #0
+		beq s_relogio0
+		cmp r5 #1
+		beq s_relogio1
+
+		mov #hFFFF r0
+		
+fim_get_clock_status:
+		rts		r7
+
+s_relogio0:
+		mov STATUS_rel0 r1
+		mov INV_rel0 	r2
+		
+		cmp r1 #1
+		beq ad_rel0_1
+
+s_relogio0_1:
+		cmp r2 #1
+		beq ad_rel0_2
+		jmp fim_get_clock_status
+
+ad_rel0_1:
+		add #2 r0
+		jmp s_relogio0_1
+
+ad_rel0_2:
+		add #1 r0
+		jmp fim_get_clock_status
+
+s_relogio1:
+		mov STATUS_rel1 r1
+		mov INV_rel1 	r2
+		
+		cmp r1 #1
+		beq ad_rel1_1
+
+s_relogio1_1:
+		cmp r2 #1
+		beq ad_rel1_2
+		jmp fim_get_clock_status
+
+ad_rel1_1:
+		add #2 r0
+		jmp s_relogio1_1
+
+ad_rel1_2:
+		add #1 r0
+		jmp fim_get_clock_status
+	
+;		
+;------------------------------------------------------------------------------
+; Essa função fornece o valor atual de cada relógio.
+; Essa informação é fornecida como um número inteiro de segundos.
+; Como cada relógio tem minutos e segundos,
+;     o valor fornecido deverá ser o resultado da aplicação da seguinte fórula (60*MIN+SEG). 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser lido.
+;   Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados. 
+; - Parâmetro de saída: registrador R0, com o número de segundos atualmente presentes no relógio. 
+; No retorno da função, o registrador R0 conterá o número de segundos correspondentes à informação atual no relógio.
+; Essa informação corresponde àquela presente no relógio, independentemente de seu estado (visível/invisível ou parado/andando). 
+;------------------------------------------------------------------------------
+_get_clock_time:
+		tst r5 
+		beq get_rel0_seconds
+		cmp r5 #1
+		beq get_rel1_seconds
+		jmp erro_get_clock_time
+
+; ==========================================
+
+get_rel0_seconds:
+		mov MIN_dec_rel0 r1
+		tst r1
+		beq get_rel0_seconds_2
+		mov #9 r2
+
+loop_rel0:
+		add MIN_dec_rel0 r1
+		dec r2
+		beq get_rel0_seconds_2
+		jmp loop_rel0
+		
+get_rel0_seconds_2:
+		add MIN_uni_rel0 r1
+		tst r1
+		beq get_rel0_seconds_3
+		mov #60 r2
+
+loop_rel0_2:
+		add r1 r3
+		dec r2
+		beq get_rel0_seconds_3
+		jmp loop_rel0_2
+
+get_rel0_seconds_3:
+		mov SEG_dec_rel0 r1
+		tst r1
+		beq get_rel0_seconds_4
+		mov #9 r2	
+
+loop_rel0_3:
+		add SEG_dec_rel0 r1
+		dec r2
+		beq get_rel0_seconds_4
+		jmp loop_rel0_3
+
+get_rel0_seconds_4:
+		add SEG_uni_rel0 r1	
+		add r1 r3
+		mov r3 r0
+		sub #10 r0
+		jmp fim_get_clock_time
+
+;=============================================
+
+
+get_rel1_seconds:
+		mov MIN_dec_rel1 r1
+		tst r1
+		beq get_rel1_seconds_2
+		mov #9 r2
+
+loop_rel1:
+		add MIN_dec_rel1 r1
+		dec r2
+		beq get_rel1_seconds_2
+		jmp loop_rel1
+		
+get_rel1_seconds_2:
+		add MIN_uni_rel1 r1
+		tst r1
+		beq get_rel1_seconds_3
+		mov #60 r2
+
+loop_rel1_2:
+		add r1 r3
+		dec r2
+		beq get_rel1_seconds_3
+		jmp loop_rel1_2
+
+get_rel1_seconds_3:
+		mov SEG_dec_rel1 r1
+		tst r1
+		beq get_rel1_seconds_4
+		mov #9 r2	
+
+loop_rel1_3:
+		add SEG_dec_rel1 r1
+		dec r2
+		beq get_rel1_seconds_4
+		jmp loop_rel1_3
+
+get_rel1_seconds_4:
+		add SEG_uni_rel1 r1	
+		add r1 r3
+		mov r3 r0
+		sub #10 r0
+
+fim_get_clock_time:
+		rts r7
+
+erro_get_clock_time:
+		mov #0 r0
+		rts r7
+
+;------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel se o relógio deve “andar” ou “parar”.  
+; - Parâmetros de entrada: 
+;   - registrador R5, com o identificador do relógio a ser ativado/desativado.
+;     Esse valor pode ser 0 (zero) ou 1 (um). Outros valores devem ser ignorados; 
+;   - registrador R4, com a indicação do estado a ser colocado o relógio.
+;     Esse valor pode ser 0 (zero), caso o relógio deva parar,
+;     ou um valor diferente de 0 (zero), caso o relógio deva andar. 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;   o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_turnon_clock:	
+		mov #0 r0
+		cmp r5 #1	
+		beq liga_rel1
+		cmp r5 #0
+		beq liga_rel0
+
+		mov #1 r0
+
+fim_turnon_clock:
+		rts		r7
+
+liga_rel1:
+		tst r4
+		beq desliga_rel1
+		mov #1 STATUS_rel1
+		jmp fim_turnon_clock
+
+desliga_rel1:
+		mov #0 STATUS_rel1
+		jmp fim_turnon_clock	
+
+liga_rel0:
+		tst r4
+		beq desliga_rel0
+		mov #1 STATUS_rel0
+		jmp fim_turnon_clock
+
+desliga_rel0:
+		mov #0 STATUS_rel0
+		jmp fim_turnon_clock	
+		
+;		
+;------------------------------------------------------------------------------
+; Essa função é usada para indicar ao kernel que o relógio deve ser zerado.
+; Ou seja, minutos e horas armazenado no relógio devem ser zerados. 
+; - Parâmetros de entrada: registrador R5, com o identificador do relógio a ser zerado.
+;   Esse valor pode ser 0 (zero) ou  1 (um). Outros valores devem ser ignorados; 
+; - Parâmetro de saída: registrador R0, com o código de erro de retorno. 
+; A função retorna no registrador R0 um código de erro. 
+; - Se não houve erro, o valor em R0 será zero; 
+; - Se houve algum erro ou informação inválida de entrada,
+;          o valor em R0 será um valor qualquer diferente de zero. 
+;------------------------------------------------------------------------------
+_clr_clock:
+		mov #0 r0
+		cmp r5 #1	
+		beq limpar_rel1
+		cmp r5 #0
+		beq limpar_rel0
+
+		mov #1 r0
+
+fim_clr_clock:
+		rts		r7
+
+limpar_rel1:
+		clr SEG_uni_rel1
+		clr SEG_dec_rel1
+		clr MIN_uni_rel1
+		clr MIN_dec_rel1
+		jmp fim_clr_clock
+
+limpar_rel0:
+		clr SEG_uni_rel0
+		clr SEG_dec_rel0
+		clr MIN_uni_rel0
+		clr MIN_dec_rel0
+		jmp fim_clr_clock
+
+;------------------------------------------------------------------------------
